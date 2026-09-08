@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdir} from 'node:fs/promises';
+import {build} from 'esbuild';
+await mkdir('.sites-runtime/test',{recursive:true});
+await build({entryPoints:['app/api/workspace/route.ts'],bundle:true,platform:'node',format:'esm',outfile:'.sites-runtime/test/route.mjs',plugins:[{name:'cookies',setup(b){b.onResolve({filter:/^next\/headers$/},()=>({path:'cookies',namespace:'mock'}));b.onLoad({filter:/.*/,namespace:'mock'},()=>({contents:'export async function cookies(){return {get(){return {value:globalThis.profile}}}}'}));}}]});
+const {GET,POST}=await import('../.sites-runtime/test/route.mjs');
+process.env.SUPABASE_URL='https://storage.test';process.env.SUPABASE_SECRET_KEY='test-server-key';
+const rows=new Map(),objects=new Map();
+globalThis.fetch=async(url,init={})=>{const u=new URL(url),method=init.method||'GET';if(u.pathname.startsWith('/rest/')){const id=u.searchParams.get('id')?.slice(3);if(method==='POST'){const r=JSON.parse(init.body);if(rows.has(r.id))return Response.json({code:'23505'},{status:409});r.number=rows.size+1;rows.set(r.id,r);return Response.json([r]);}if(method==='PATCH'){const r=rows.get(id);if(!r||r.revision!==Number(u.searchParams.get('revision').slice(3)))return Response.json([]);Object.assign(r,JSON.parse(init.body));return Response.json([r]);}const owner=u.searchParams.get('creator_id')?.slice(3);return Response.json([...rows.values()].filter(r=>(!id||id===r.id)&&(!owner||owner===r.creator_id)));}if(method==='POST'){objects.set(u.pathname,init.body);return Response.json({});}if(method==='DELETE'){for(const path of JSON.parse(init.body).prefixes)objects.delete('/storage/v1/object/kesher-photos/'+path);return Response.json({});}throw Error('Unexpected transport call');};
+function post(p,photos=[],profile=globalThis.profile){const f=new FormData();f.set('payload',JSON.stringify(p));for(const file of photos)f.append('photos',file);return POST(new Request('https://app.test/api/workspace',{method:'POST',headers:{'x-workspace-request':'1','x-workspace-profile':profile},body:f}));}
+const get=(id='')=>GET(new Request('https://app.test/api/workspace'+(id?'?ticket='+id:'')));
+const photo=()=>new File([new Uint8Array([255,216,255,224,0,1])],'camera.jpg',{type:'image/jpeg'});
+const id=crypto.randomUUID();
+test('profile selection, durable request contract, photos, revisions and retries',async()=>{
+ globalThis.profile=undefined;assert.equal((await get()).status,401);
+ globalThis.profile='yitzhak';const p={action:'create',mutation_id:id,title:'אוטומציה לא עובדת',kind:'issue'};
+ assert.equal((await post(p,[photo()])).status,201);assert.equal(rows.get(id).images.length,1);
+ assert.equal((await post(p,[photo()])).status,201);assert.equal(rows.size,1);assert.equal(objects.size,1);
+ globalThis.profile='daniel';assert.equal((await (await get()).json()).tickets.length,0);assert.equal((await get(id)).status,404);
+ globalThis.profile='web3d';assert.equal((await (await get()).json()).tickets.length,1);
+ const update={action:'update',id,mutation_id:crypto.randomUUID(),revision:1,status:'in_progress',due_date:'2026-09-20',body:'בטיפול'};
+ assert.equal((await post(update,[photo()])).status,200);assert.equal(rows.get(id).revision,2);assert.equal(rows.get(id).updates[0].images.length,1);
+ assert.equal((await post(update)).status,200);assert.equal(rows.get(id).updates.length,1);
+ assert.equal((await post({...update,mutation_id:crypto.randomUUID()})).status,409);
+ const [a,b]=await Promise.all([post({...update,revision:2,mutation_id:crypto.randomUUID(),body:'א'}),post({...update,revision:2,mutation_id:crypto.randomUUID(),body:'ב'})]);assert.deepEqual([a.status,b.status].sort(),[200,409]);
+ globalThis.profile='yitzhak';assert.equal((await post({...update,revision:3,mutation_id:crypto.randomUUID()})).status,403);
+ assert.equal((await post({action:'comment',id,mutation_id:crypto.randomUUID(),body:'עוד תמונה'},[photo()])).status,200);
+ assert.equal((await post({...p,mutation_id:crypto.randomUUID()},[],'yoel')).status,409);
+ const before=objects.size;assert.equal((await post({...p,mutation_id:crypto.randomUUID()},[photo(),new File(['not an image'],'bad.png',{type:'image/png'})])).status,400);assert.equal(objects.size,before);
+ globalThis.profile='web3d';assert.equal((await post({...update,revision:4,mutation_id:crypto.randomUUID(),status:'done',body:'תוקן'})).status,200);
+ globalThis.profile='yitzhak';assert.equal((await post({action:'reopen',id,mutation_id:crypto.randomUUID(),revision:5})).status,200);assert.equal(rows.get(id).status,'new');
+ delete process.env.SUPABASE_URL;assert.equal((await get()).status,503);
+});
